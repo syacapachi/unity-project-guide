@@ -30,9 +30,8 @@ VOLATILE_APP_VALUES = {
 
 
 def _canonicalize_xml(data: bytes) -> bytes:
-    """XMLの属性順や名前空間表現を正規化し、差分が安定する形へ変換する関数。"""
-    text = data.decode("utf-8-sig")
-    normalized = ElementTree.canonicalize(xml_data=text, with_comments=True, strip_text=False)
+    """XMLの属性順や名前空間表現を正規化し、UTF-8のバイト列へ変換する関数。"""
+    normalized = ElementTree.canonicalize(xml_data=data, with_comments=True, strip_text=False)
     return normalized.encode("utf-8")
 
 

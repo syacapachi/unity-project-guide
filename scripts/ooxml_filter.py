@@ -4,7 +4,6 @@ import argparse
 import hashlib
 import shutil
 import subprocess
-import sys
 import zipfile
 from io import BytesIO
 from pathlib import Path
@@ -15,6 +14,7 @@ from ooxml_utils import (
     safe_archive_name,
     unpack_zip_data,
     write_all_stdout,
+    write_text_stdout_utf8,
     write_zip_entry,
 )
 from ooxml_xml import maybe_normalize_member
@@ -94,7 +94,7 @@ def textconv_data(data: bytes) -> str:
 def textconv(path: str | None) -> None:
     """git diffから呼ばれ、ファイルまたは標準入力のOOXMLをテキスト化して出力する関数。"""
     data = Path(path).read_bytes() if path else read_all_stdin()
-    sys.stdout.write(textconv_data(data))
+    write_text_stdout_utf8(textconv_data(data))
 
 
 def install_git_config() -> None:

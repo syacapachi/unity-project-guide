@@ -20,6 +20,11 @@ def write_all_stdout(data: bytes) -> None:
     sys.stdout.buffer.write(data)
 
 
+def write_text_stdout_utf8(text: str) -> None:
+    """標準出力へGit textconvのテキスト結果をUTF-8のバイト列として書き出す関数。"""
+    sys.stdout.buffer.write(text.encode("utf-8", errors="replace"))
+
+
 def is_zip_data(data: bytes) -> bool:
     """受け取ったバイト列がzipとして読めるかを判定する関数。"""
     try:
