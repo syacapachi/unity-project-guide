@@ -100,11 +100,11 @@ def textconv(path: str | None) -> None:
 def install_git_config() -> None:
     """このリポジトリのローカルGit設定へOOXML filterとdiff driverを登録する関数。"""
     commands = [
-        ["git", "config", "--local", "filter.ooxml.clean", "python scripts/ooxml_filter.py clean"],
-        ["git", "config", "--local", "filter.ooxml.smudge", "python scripts/ooxml_filter.py smudge"],
+        ["git", "config", "--local", "filter.ooxml.clean", "python -B scripts/ooxml_filter.py clean"],
+        ["git", "config", "--local", "filter.ooxml.smudge", "python -B scripts/ooxml_filter.py smudge"],
         ["git", "config", "--local", "filter.ooxml.required", "true"],
-        ["git", "config", "--local", "diff.ooxml.textconv", "python scripts/ooxml_filter.py textconv"],
-        ["git", "config", "--local", "diff.ooxml.cachetextconv", "true"],
+        ["git", "config", "--local", "diff.ooxml.textconv", "python -B scripts/ooxml_filter.py textconv"],
+        ["git", "config", "--local", "diff.ooxml.cachetextconv", "false"],
     ]
     for command in commands:
         subprocess.run(command, check=True)
