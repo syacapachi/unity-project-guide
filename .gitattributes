@@ -1,0 +1,15 @@
+# Office Open XML zipをGit登録時に正規化し、差分表示時は展開済みXMLとして扱う
+*.pptx filter=ooxml diff=ooxml
+*.pptm filter=ooxml diff=ooxml
+*.docx filter=ooxml diff=ooxml
+*.docm filter=ooxml diff=ooxml
+*.xlsx filter=ooxml diff=ooxml
+*.xlsm filter=ooxml diff=ooxml
+*.xltx filter=ooxml diff=ooxml
+*.xltm filter=ooxml diff=ooxml
+*.xlmx filter=ooxml diff=ooxml
+
+# 旧形式Officeファイルはzipではないため、正規化せずバイナリとして扱う
+*.ppt binary
+*.doc binary
+*.xls binary
