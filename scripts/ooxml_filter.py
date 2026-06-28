@@ -104,7 +104,7 @@ def install_git_config() -> None:
         ["git", "config", "--local", "filter.ooxml.smudge", "python -B scripts/ooxml_filter.py smudge"],
         ["git", "config", "--local", "filter.ooxml.required", "true"],
         ["git", "config", "--local", "diff.ooxml.textconv", "python -B scripts/ooxml_filter.py textconv"],
-        ["git", "config", "--local", "diff.ooxml.cachetextconv", "false"],
+        ["git", "config", "--local", "diff.ooxml.cachetextconv", "true"],
     ]
     for command in commands:
         subprocess.run(command, check=True)
