@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 from xml.etree import ElementTree
 
 
@@ -29,51 +30,65 @@ VOLATILE_APP_VALUES = {
 }
 
 
-def _canonicalize_xml(data: bytes) -> bytes:
-    """XMLの属性順や名前空間表現を正規化し、UTF-8のバイト列へ変換する関数。"""
-    normalized = ElementTree.canonicalize(xml_data=data, with_comments=True, strip_text=False)
-    return normalized.encode("utf-8")
+def _decode_xml(data: bytes) -> tuple[str, str]:
+    """XML宣言やBOMから主要な文字コードを推定し、文字列へ変換する関数。"""
+    if data.startswith(b"\xff\xfe") or data.startswith(b"\xfe\xff"):
+        return data.decode("utf-16"), "utf-16"
+    if data.startswith(b"\xef\xbb\xbf"):
+        return data.decode("utf-8-sig"), "utf-8"
+
+    head = data[:200].decode("ascii", errors="ignore")
+    match = re.search(r'encoding=["\']([^"\']+)["\']', head, flags=re.IGNORECASE)
+    encoding = match.group(1) if match else "utf-8"
+    return data.decode(encoding), encoding
 
 
-def _set_existing_child_text(root: ElementTree.Element, values: dict[tuple[str, str], str]) -> None:
-    """既に存在するXMLのメタデータ要素の値を固定値へ置き換える関数。"""
-    for child in list(root):
-        namespace = ""
-        local_name = child.tag
-        if child.tag.startswith("{"):
-            namespace, local_name = child.tag[1:].split("}", 1)
-        value = values.get((namespace, local_name))
-        if value is not None:
-            child.text = value
-            child.tail = child.tail or ""
+def _encode_xml(text: str, encoding: str) -> bytes:
+    """XML文字列を元の文字コードへ戻す関数。"""
+    return text.encode(encoding)
+
+
+def _set_existing_element_text(xml_text: str, tag_name: str, value: str) -> str:
+    """既に存在するXML要素の本文だけを、接頭辞を保ったまま固定値へ置き換える関数。"""
+    escaped_value = (
+        value.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+    pattern = re.compile(
+        rf"(<(?P<prefix>[A-Za-z_][\w.-]*:)?{re.escape(tag_name)}\b[^>]*>)(.*?)(</(?P=prefix)?{re.escape(tag_name)}>)",
+        flags=re.DOTALL,
+    )
+    return pattern.sub(lambda match: f"{match.group(1)}{escaped_value}{match.group(4)}", xml_text, count=1)
 
 
 def _normalize_metadata_xml(path: Path, data: bytes) -> bytes:
     """OOXMLの更新日時や編集者など、Officeが書き換えやすいXMLのメタデータを正規化する関数。"""
-    try:
-        root = ElementTree.fromstring(data)
-    except ElementTree.ParseError:
-        return data
-
     normalized_path = path.as_posix()
+    values = {}
     if normalized_path == "docProps/core.xml":
-        _set_existing_child_text(root, VOLATILE_CORE_VALUES)
+        values = VOLATILE_CORE_VALUES
     elif normalized_path == "docProps/app.xml":
-        _set_existing_child_text(root, VOLATILE_APP_VALUES)
-    else:
+        values = VOLATILE_APP_VALUES
+    if not values:
         return data
 
-    return ElementTree.tostring(root, encoding="utf-8", xml_declaration=False)
+    try:
+        ElementTree.fromstring(data)
+        xml_text, encoding = _decode_xml(data)
+    except (ElementTree.ParseError, UnicodeDecodeError, LookupError):
+        return data
+
+    for (_, local_name), value in values.items():
+        xml_text = _set_existing_element_text(xml_text, local_name, value)
+    return _encode_xml(xml_text, encoding)
 
 
 def _normalize_xml_data(relative_path: Path, data: bytes) -> bytes:
     """OOXML内のXMLデータを、相対パスに応じたメタデータ処理込みで正規化する関数。"""
     if relative_path.as_posix().startswith("docProps/"):
-        data = _normalize_metadata_xml(relative_path, data)
-    try:
-        return _canonicalize_xml(data)
-    except (ElementTree.ParseError, UnicodeDecodeError):
-        return data
+        return _normalize_metadata_xml(relative_path, data)
+    return data
 
 
 def _normalize_xml_file(path: Path, relative_path: Path) -> None:
