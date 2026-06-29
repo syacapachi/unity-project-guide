@@ -3,77 +3,50 @@ from __future__ import annotations
 import argparse
 import shutil
 import subprocess
-import zipfile
-from io import BytesIO
 from pathlib import Path
 
 from ooxml_utils import (
-    is_zip_data,
     read_all_stdin,
-    safe_archive_name,
-    unpack_zip_data,
     write_all_stdout,
     write_text_stdout_utf8,
-    write_zip_entry,
+)
+from ooxml_storage import (
+    container_to_zip_data,
+    directory_to_zip_data,
+    is_ooxml_tar_data,
+    unpack_container_data,
+    zip_to_tar_data,
 )
 from ooxml_summary import summarize_ooxml_for_textconv
-from ooxml_xml import maybe_normalize_member
-
-
-def _write_normalized_zip(src: Path, dst: Path) -> None:
-    """展開済みディレクトリを固定順序・固定時刻のzipへ再圧縮する関数。"""
-    files = sorted(path for path in src.rglob("*") if path.is_file())
-    with zipfile.ZipFile(dst, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
-        for path in files:
-            arcname = path.relative_to(src).as_posix()
-            write_zip_entry(archive, arcname, maybe_normalize_member(arcname, path.read_bytes()))
-
-
-def _normalize_ooxml_zip_data(data: bytes) -> bytes:
-    """OOXML zipをメモリ上でXML正規化し、固定条件で再圧縮して返す関数。"""
-    if not is_zip_data(data):
-        return data
-
-    try:
-        input_zip = zipfile.ZipFile(BytesIO(data))
-        output = BytesIO()
-        with input_zip, zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as output_zip:
-            names = sorted(name for name in input_zip.namelist() if not name.endswith("/"))
-            for name in names:
-                arcname = safe_archive_name(name)
-                payload = maybe_normalize_member(arcname, input_zip.read(name))
-                write_zip_entry(output_zip, arcname, payload)
-        return output.getvalue()
-    except (OSError, ValueError, zipfile.BadZipFile):
-        return data
 
 
 def clean_stdin() -> None:
-    """git add時に呼ばれ、OOXMLファイルを正規化zipへ変換する関数。"""
-    write_all_stdout(_normalize_ooxml_zip_data(read_all_stdin()))
+    """git add時に呼ばれ、OOXML zipを正規化済みtarへ変換する関数。"""
+    write_all_stdout(zip_to_tar_data(read_all_stdin()))
 
 
 def smudge_stdin() -> None:
-    """git checkout時に呼ばれ、保存済みOOXML zipをそのまま作業ツリーへ戻す関数。"""
-    write_all_stdout(read_all_stdin())
+    """git checkout時に呼ばれ、Git保存用tarを作業ツリー用OOXML zipへ戻す関数。"""
+    data = read_all_stdin()
+    write_all_stdout(container_to_zip_data(data) if is_ooxml_tar_data(data) else data)
 
 
 def pack_directory(src: Path, dst: Path) -> None:
     """指定ディレクトリをOOXML向けに正規化してzipファイルへまとめる関数。"""
-    _write_normalized_zip(src, dst)
+    dst.write_bytes(directory_to_zip_data(src))
 
 
 def unpack_file(src: Path, dst: Path) -> None:
-    """zipファイルを指定ディレクトリへ安全に展開する関数。"""
+    """ZIP/TAR形式のOOXML保存データを指定ディレクトリへ安全に展開する関数。"""
     if dst.exists():
         shutil.rmtree(dst)
     dst.mkdir(parents=True)
-    unpack_zip_data(src.read_bytes(), dst)
+    unpack_container_data(src.read_bytes(), dst)
 
 
 def textconv_data(data: bytes) -> str:
-    """git diff用にOOXML zipの中身をテキスト表現へ変換する関数。"""
-    normalized = _normalize_ooxml_zip_data(data)
+    """git diff用にZIP/TAR形式のOOXMLをテキスト表現へ変換する関数。"""
+    normalized = container_to_zip_data(data)
     return summarize_ooxml_for_textconv(normalized)
 
 
@@ -103,20 +76,20 @@ def build_parser() -> argparse.ArgumentParser:
     # 第一引数チェック
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    # help-> clean  read OOXML from stdin and write normalized zip to stdout
-    subparsers.add_parser("clean", help="read OOXML from stdin and write normalized zip to stdout")
-    subparsers.add_parser("smudge", help="pass OOXML from stdin to stdout")
+    # Git filterとして呼び出されるclean/smudgeサブコマンドを設定
+    subparsers.add_parser("clean", help="read OOXML zip from stdin and write normalized tar to stdout")
+    subparsers.add_parser("smudge", help="read normalized tar from stdin and write OOXML zip to stdout")
 
     pack_parser = subparsers.add_parser("pack", help="pack an unpacked OOXML directory")
     #python this.py pack [src] [dst] のように引数を名前としてアクセスできるようにする
     pack_parser.add_argument("src")
     pack_parser.add_argument("dst")
 
-    unpack_parser = subparsers.add_parser("unpack", help="unpack an OOXML zip file")
+    unpack_parser = subparsers.add_parser("unpack", help="unpack an OOXML zip or filter tar file")
     unpack_parser.add_argument("src")
     unpack_parser.add_argument("dst")
 
-    textconv_parser = subparsers.add_parser("textconv", help="convert OOXML zip to text for git diff")
+    textconv_parser = subparsers.add_parser("textconv", help="convert OOXML zip or filter tar to text for git diff")
     textconv_parser.add_argument("path", nargs="?")
 
     subparsers.add_parser("install", help="install local git filter and diff settings")
