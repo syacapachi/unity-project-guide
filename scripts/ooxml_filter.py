@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import shutil
 import subprocess
 import zipfile
@@ -17,6 +16,7 @@ from ooxml_utils import (
     write_text_stdout_utf8,
     write_zip_entry,
 )
+from ooxml_summary import summarize_ooxml_for_textconv
 from ooxml_xml import maybe_normalize_member
 
 
@@ -74,21 +74,7 @@ def unpack_file(src: Path, dst: Path) -> None:
 def textconv_data(data: bytes) -> str:
     """git diff用にOOXML zipの中身をテキスト表現へ変換する関数。"""
     normalized = _normalize_ooxml_zip_data(data)
-    if not is_zip_data(normalized):
-        return normalized.decode("utf-8", errors="replace")
-
-    lines: list[str] = []
-    with zipfile.ZipFile(BytesIO(normalized)) as archive:
-        for name in sorted(item for item in archive.namelist() if not item.endswith("/")):
-            payload = archive.read(name)
-            lines.append(f"--- {name}")
-            if name.lower().endswith((".xml", ".rels")):
-                lines.append(payload.decode("utf-8", errors="replace"))
-            else:
-                digest = hashlib.sha256(payload).hexdigest()
-                lines.append(f"<binary size={len(payload)} sha256={digest}>")
-            lines.append("")
-    return "\n".join(lines)
+    return summarize_ooxml_for_textconv(normalized)
 
 
 def textconv(path: str | None) -> None:
@@ -104,7 +90,7 @@ def install_git_config() -> None:
         ["git", "config", "--local", "filter.ooxml.smudge", "python -B scripts/ooxml_filter.py smudge"],
         ["git", "config", "--local", "filter.ooxml.required", "true"],
         ["git", "config", "--local", "diff.ooxml.textconv", "python -B scripts/ooxml_filter.py textconv"],
-        ["git", "config", "--local", "diff.ooxml.cachetextconv", "true"],
+        ["git", "config", "--local", "diff.ooxml.cachetextconv", "false"],
     ]
     for command in commands:
         subprocess.run(command, check=True)
