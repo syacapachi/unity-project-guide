@@ -16,16 +16,16 @@ NS = {
 
 # Replace()する辞書
 VOLATILE_CORE_VALUES = {
-    (NS["dc"], "creator"): "",
-    (NS["cp"], "lastModifiedBy"): "",
-    (NS["cp"], "revision"): "1",
-    (NS["dcterms"], "created"): FIXED_ISO_TIME,
+    #(NS["dc"], "creator"): "",
+    #(NS["cp"], "lastModifiedBy"): "",
+    #(NS["cp"], "revision"): "1",
+    #(NS["dcterms"], "created"): FIXED_ISO_TIME,
     #(NS["dcterms"], "modified"): FIXED_ISO_TIME,
 }
 # Replace()する辞書
 VOLATILE_APP_VALUES = {
-    (NS["ep"], "TotalTime"): "0",
-    (NS["ep"], "AppVersion"): "",
+    #(NS["ep"], "TotalTime"): "0",
+    #(NS["ep"], "AppVersion"): "",
 }
 
 
