@@ -6,6 +6,8 @@ import subprocess
 import sys
 import zipfile
 from copy import deepcopy
+from dataclasses import dataclass
+from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 from xml.etree import ElementTree as ET
@@ -31,6 +33,7 @@ NS_SS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 REL_SLIDE = f"{NS_OFFICE_REL}/slide"
 REL_WORKSHEET = f"{NS_OFFICE_REL}/worksheet"
 MERGE_WARNING = "OOXML自動マージ: incoming側のXML差分を末尾へ追加しました。内容を手動確認してください。"
+REPORT_DIR = "mergereport"
 
 OOXML_EXTENSIONS = {
     ".pptx",
@@ -50,6 +53,18 @@ OOXML_EXTENSIONS = {
 # - 同じスライド・段落・セルを両者が編集した場合、意味的な統合や優先順位判断はできない。
 # - PowerPointのスライドマスター、Wordのスタイル/番号定義、Excelのスタイル/数式参照の完全統合はできない。
 # - マクロ、外部リンク、コメント、変更履歴、署名、埋め込みOLEなど、Office固有の複雑な関連部品は手動確認が必要になる。
+
+
+@dataclass
+class MergeReportEntry:
+    """外部レポートに残す、自動マージで追加した部品の情報を表すクラス。"""
+
+    kind: str
+    added_part: str
+    base_part: str | None
+    current_part: str | None
+    incoming_part: str
+    note: str
 
 
 def register_namespaces() -> None:
@@ -116,34 +131,63 @@ def xml_bytes(root: ET.Element) -> bytes:
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
 
-def sanitize_xml_comment(text: str) -> str:
-    """XMLコメントとして不正な連続ハイフンなどを避けた文字列へ変換する関数。"""
-    sanitized = text.replace("--", "- -")
-    if sanitized.endswith("-"):
-        sanitized += " "
-    return sanitized
-
-
 def comparison_note(base_part: str | None, current_part: str | None, incoming_part: str) -> str:
-    """追加XMLへ書き込む比較対象メモを作る関数。"""
+    """外部レポートへ書き込む比較対象メモを作る関数。"""
     return f"base={base_part or '(none)'} current={current_part or '(none)'} incoming={incoming_part}"
 
 
-def warning_comment_text(base_part: str | None, current_part: str | None, incoming_part: str) -> str:
-    """追加XMLへ書き込む警告文と比較対象をまとめる関数。"""
-    return sanitize_xml_comment(f"{MERGE_WARNING} 比較対象: {comparison_note(base_part, current_part, incoming_part)}")
+def markdown_cell(text: str | None) -> str:
+    """Markdown表のセルに入れる文字列を安全な表記へ変換する関数。"""
+    if not text:
+        return "(none)"
+    return text.replace("|", "\\|").replace("\n", "<br>")
 
 
-def add_warning_comment_to_xml(data: bytes, base_part: str | None, current_part: str | None, incoming_part: str) -> bytes:
-    """コピーしたXML部品へ、警告文と比較対象をXMLコメントとして埋め込む関数。"""
-    comment = f"<!-- {warning_comment_text(base_part, current_part, incoming_part)} -->\n"
-    text = data.decode("utf-8", errors="replace")
-    stripped = text.lstrip()
-    if stripped.startswith("<?xml"):
-        declaration_end = text.find("?>")
-        if declaration_end != -1:
-            return (text[: declaration_end + 2] + "\n" + comment + text[declaration_end + 2 :]).encode("utf-8")
-    return (comment + text).encode("utf-8")
+def report_filename(worktree_path: str | None, kind: str) -> str:
+    """マージ対象パスと時刻からレポートファイル名を作る関数。"""
+    raw_name = Path(worktree_path or f"ooxml-{kind}").name
+    safe_name = "".join(ch if ch.isalnum() or ch in {".", "-", "_"} else "_" for ch in raw_name)
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    return f"{safe_name}-{timestamp}.md"
+
+
+def write_merge_report(entries: list[MergeReportEntry], worktree_path: str | None, kind: str) -> Path | None:
+    """自動マージで追加した内容と警告をmergereport配下のMarkdownへ保存する関数。"""
+    if not entries:
+        return None
+
+    report_dir = Path(REPORT_DIR)
+    report_dir.mkdir(parents=True, exist_ok=True)
+    report_path = report_dir / report_filename(worktree_path, kind)
+    lines = [
+        "# OOXML Merge Report",
+        "",
+        f"- target: `{worktree_path or '(unknown)'}`",
+        f"- kind: `{kind}`",
+        f"- warning: {MERGE_WARNING}",
+        "",
+        "## Added Parts",
+        "",
+        "| kind | added | base | current | incoming | note |",
+        "|---|---|---|---|---|---|",
+    ]
+    for entry in entries:
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    markdown_cell(entry.kind),
+                    markdown_cell(entry.added_part),
+                    markdown_cell(entry.base_part),
+                    markdown_cell(entry.current_part),
+                    markdown_cell(entry.incoming_part),
+                    markdown_cell(entry.note),
+                ]
+            )
+            + " |"
+        )
+    report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return report_path
 
 
 def xml_member_changed(
@@ -327,6 +371,154 @@ def copy_part_recursive(
     copy_related_parts(source, target, source_part, target_part, mapping)
 
 
+def relationship_targets_by_type(members: dict[str, bytes], part_name: str, rel_type: str) -> list[str]:
+    """指定部品のrelationshipから、指定Typeの参照先部品を取得する関数。"""
+    rels_name = rels_path_for_part(part_name)
+    if rels_name not in members:
+        return []
+    rels_root = parse_xml(members, rels_name)
+    targets: list[str] = []
+    for rel in rels_root.findall(q(NS_REL, "Relationship")):
+        if rel.get("Type") == rel_type and rel.get("TargetMode") != "External":
+            targets.append(part_from_relationship_target(part_name, rel.get("Target", "")))
+    return targets
+
+
+def slide_layout_for_slide(members: dict[str, bytes], slide_part: str | None) -> str | None:
+    """PowerPointスライドが参照しているslideLayout部品を返す関数。"""
+    if not slide_part:
+        return None
+    targets = relationship_targets_by_type(members, slide_part, f"{NS_OFFICE_REL}/slideLayout")
+    return targets[0] if targets else None
+
+
+def presentation_master_parts(members: dict[str, bytes]) -> list[str]:
+    """PowerPointのpresentation.xmlからslideMaster部品を取得する関数。"""
+    if "ppt/_rels/presentation.xml.rels" not in members:
+        return []
+    return relationship_targets_by_type(members, "ppt/presentation.xml", f"{NS_OFFICE_REL}/slideMaster")
+
+
+def next_numbered_part_name(members: dict[str, bytes], directory: str, prefix: str, suffix: str) -> str:
+    """slideLayout12.xmlのような連番部品名の次の未使用パスを作る関数。"""
+    used = numbers_from_paths([name for name in members if name.startswith(directory + "/")], prefix, suffix)
+    number = next_numeric_suffix(used)
+    return f"{directory}/{prefix}{number}{suffix}"
+
+
+def add_layout_to_master(members: dict[str, bytes], master_part: str, layout_part: str) -> None:
+    """slideMaster.xmlとそのrelsへ、新しいslideLayout参照を登録する関数。"""
+    master_root = parse_xml(members, master_part)
+    master_rels_path = rels_path_for_part(master_part)
+    master_rels = parse_xml(members, master_rels_path)
+    rel_id = add_relationship(master_rels, f"{NS_OFFICE_REL}/slideLayout", target_from_part(master_part, layout_part))
+
+    layout_list = master_root.find(q(NS_P, "sldLayoutIdLst"))
+    if layout_list is None:
+        layout_list = ET.SubElement(master_root, q(NS_P, "sldLayoutIdLst"))
+    used_ids = {
+        int(item.get("id", "0"))
+        for item in layout_list.findall(q(NS_P, "sldLayoutId"))
+        if item.get("id", "0").isdigit()
+    }
+    layout_id = max(used_ids | {2147483648}) + 1
+    ET.SubElement(layout_list, q(NS_P, "sldLayoutId"), {"id": str(layout_id), q(NS_R, "id"): rel_id})
+
+    members[master_part] = xml_bytes(master_root)
+    members[master_rels_path] = xml_bytes(master_rels)
+
+
+def copy_pptx_layout_as_standard_part(
+    source: dict[str, bytes],
+    target: dict[str, bytes],
+    source_layout: str,
+) -> str | None:
+    """incomingのslideLayoutを_incoming名ではなく標準連番名でコピーする関数。"""
+    if source_layout not in source:
+        return None
+
+    target_layout = next_numbered_part_name(target, "ppt/slideLayouts", "slideLayout", ".xml")
+    target[target_layout] = source[source_layout]
+    merge_content_types_for_part(source, target, source_layout, target_layout)
+
+    target_masters = presentation_master_parts(target)
+    target_master = target_masters[0] if target_masters else None
+    source_rels_path = rels_path_for_part(source_layout)
+    if source_rels_path in source:
+        rels_root = parse_xml(source, source_rels_path)
+        for rel in rels_root.findall(q(NS_REL, "Relationship")):
+            if rel.get("TargetMode") == "External":
+                continue
+            if rel.get("Type") == f"{NS_OFFICE_REL}/slideMaster" and target_master:
+                rel.set("Target", target_from_part(target_layout, target_master))
+        target[rels_path_for_part(target_layout)] = xml_bytes(rels_root)
+    elif target_master:
+        rels_root = ET.Element(q(NS_REL, "Relationships"))
+        add_relationship(rels_root, f"{NS_OFFICE_REL}/slideMaster", target_from_part(target_layout, target_master))
+        target[rels_path_for_part(target_layout)] = xml_bytes(rels_root)
+
+    if target_master:
+        add_layout_to_master(target, target_master, target_layout)
+    return target_layout
+
+
+def choose_pptx_layout(
+    source: dict[str, bytes],
+    target: dict[str, bytes],
+    source_slide: str,
+    current_slide: str | None,
+) -> tuple[str | None, str]:
+    """追加スライドに使う安全なslideLayoutを選ぶ関数。"""
+    current_layout = slide_layout_for_slide(target, current_slide)
+    if current_layout and current_layout in target:
+        return current_layout, "current counterpart slide layout reused"
+
+    source_layout = slide_layout_for_slide(source, source_slide)
+    if source_layout and source_layout in target:
+        return source_layout, "same named current layout reused"
+    if source_layout:
+        copied_layout = copy_pptx_layout_as_standard_part(source, target, source_layout)
+        if copied_layout:
+            return copied_layout, "incoming layout copied as standard numbered layout"
+    return None, "slide layout relationship omitted because no safe layout was found"
+
+
+def copy_pptx_slide_without_structural_duplicates(
+    source: dict[str, bytes],
+    target: dict[str, bytes],
+    source_slide: str,
+    target_slide: str,
+    layout_part: str | None,
+) -> None:
+    """slideLayout/slideMaster/themeを_incoming複製せず、スライド本体と直接関連部品をコピーする関数。"""
+    target[target_slide] = source[source_slide]
+    merge_content_types_for_part(source, target, source_slide, target_slide)
+
+    source_rels = rels_path_for_part(source_slide)
+    if source_rels not in source:
+        return
+
+    rels_root = parse_xml(source, source_rels)
+    for rel in list(rels_root.findall(q(NS_REL, "Relationship"))):
+        if rel.get("TargetMode") == "External":
+            continue
+        rel_type = rel.get("Type", "")
+        old_target = part_from_relationship_target(source_slide, rel.get("Target", ""))
+        if rel_type == f"{NS_OFFICE_REL}/slideLayout":
+            if layout_part:
+                rel.set("Target", target_from_part(target_slide, layout_part))
+            else:
+                rels_root.remove(rel)
+            continue
+        if old_target not in source:
+            continue
+        new_target = unique_part_name(target, old_target)
+        copy_part_recursive(source, target, old_target, new_target, {old_target: new_target})
+        rel.set("Target", target_from_part(target_slide, new_target))
+
+    target[rels_path_for_part(target_slide)] = xml_bytes(rels_root)
+
+
 def presentation_slide_parts(members: dict[str, bytes]) -> list[str]:
     """PowerPointのpresentation.xmlからスライド部品を表示順に取得する関数。"""
     presentation = parse_xml(members, "ppt/presentation.xml")
@@ -348,7 +540,12 @@ def presentation_slide_parts(members: dict[str, bytes]) -> list[str]:
     return slide_parts
 
 
-def append_pptx_incoming(base: dict[str, bytes], current: dict[str, bytes], incoming: dict[str, bytes]) -> None:
+def append_pptx_incoming(
+    base: dict[str, bytes],
+    current: dict[str, bytes],
+    incoming: dict[str, bytes],
+    report_entries: list[MergeReportEntry],
+) -> None:
     """incoming側で差分のあるPowerPointスライドだけをcurrent側の末尾へ追加する関数。"""
     presentation = parse_xml(current, "ppt/presentation.xml")
     presentation_rels = parse_xml(current, "ppt/_rels/presentation.xml.rels")
@@ -377,10 +574,20 @@ def append_pptx_incoming(base: dict[str, bytes], current: dict[str, bytes], inco
         slide_number = next_numeric_suffix(used_slide_numbers)
         used_slide_numbers.add(slide_number)
         target_slide = f"ppt/slides/slide{slide_number}.xml"
-        copy_part_recursive(incoming, current, source_slide, target_slide, {source_slide: target_slide})
-        current[target_slide] = add_warning_comment_to_xml(current[target_slide], base_slide, current_slide, source_slide)
+        layout_part, layout_note = choose_pptx_layout(incoming, current, source_slide, current_slide)
+        copy_pptx_slide_without_structural_duplicates(incoming, current, source_slide, target_slide, layout_part)
         rel_id = add_relationship(presentation_rels, REL_SLIDE, f"slides/slide{slide_number}.xml")
         ET.SubElement(slide_id_list, q(NS_P, "sldId"), {"id": str(next_slide_id), q(NS_R, "id"): rel_id})
+        report_entries.append(
+            MergeReportEntry(
+                kind="pptx-slide",
+                added_part=target_slide,
+                base_part=base_slide,
+                current_part=current_slide,
+                incoming_part=source_slide,
+                note=f"{comparison_note(base_slide, current_slide, source_slide)}; layout={layout_part or '(none)'}; {layout_note}",
+            )
+        )
         next_slide_id += 1
         appended = True
 
@@ -432,7 +639,12 @@ def rewrite_relationship_ids(element: ET.Element, rid_map: dict[str, str]) -> No
                 node.set(attr_name, rid_map[attr_value])
 
 
-def append_docx_incoming(base: dict[str, bytes], current: dict[str, bytes], incoming: dict[str, bytes]) -> None:
+def append_docx_incoming(
+    base: dict[str, bytes],
+    current: dict[str, bytes],
+    incoming: dict[str, bytes],
+    report_entries: list[MergeReportEntry],
+) -> None:
     """incoming側で差分のあるWord本文だけを改ページ付きでcurrent側の末尾へ追加する関数。"""
     if not xml_member_changed(base, current, incoming, "word/document.xml", "word/document.xml", "word/document.xml"):
         return
@@ -452,7 +664,6 @@ def append_docx_incoming(base: dict[str, bytes], current: dict[str, bytes], inco
     page_break_paragraph = ET.Element(q(NS_W, "p"))
     run = ET.SubElement(page_break_paragraph, q(NS_W, "r"))
     ET.SubElement(run, q(NS_W, "br"), {q(NS_W, "type"): "page"})
-    current_body.append(ET.Comment(warning_comment_text("word/document.xml", "word/document.xml", "word/document.xml")))
     current_body.append(page_break_paragraph)
 
     for child in list(incoming_body):
@@ -465,6 +676,16 @@ def append_docx_incoming(base: dict[str, bytes], current: dict[str, bytes], inco
     if current_sect is not None:
         current_body.append(current_sect)
     current["word/document.xml"] = xml_bytes(current_doc)
+    report_entries.append(
+        MergeReportEntry(
+            kind="docx-body",
+            added_part="word/document.xml",
+            base_part="word/document.xml",
+            current_part="word/document.xml",
+            incoming_part="word/document.xml",
+            note=comparison_note("word/document.xml", "word/document.xml", "word/document.xml"),
+        )
+    )
 
 
 def shared_string_count(root: ET.Element | None) -> int:
@@ -561,7 +782,12 @@ def shared_strings_changed(base: dict[str, bytes], current: dict[str, bytes], in
     )
 
 
-def append_xlsx_incoming(base: dict[str, bytes], current: dict[str, bytes], incoming: dict[str, bytes]) -> None:
+def append_xlsx_incoming(
+    base: dict[str, bytes],
+    current: dict[str, bytes],
+    incoming: dict[str, bytes],
+    report_entries: list[MergeReportEntry],
+) -> None:
     """incoming側で差分のあるExcelシートだけをcurrent側の末尾へ追加する関数。"""
     workbook = parse_xml(current, "xl/workbook.xml")
     workbook_rels = parse_xml(current, "xl/_rels/workbook.xml.rels")
@@ -612,7 +838,7 @@ def append_xlsx_incoming(base: dict[str, bytes], current: dict[str, bytes], inco
 
         sheet_root = parse_xml(incoming, source_sheet)
         remap_sheet_shared_strings(sheet_root, shared_string_offset)
-        current[target_sheet] = add_warning_comment_to_xml(xml_bytes(sheet_root), compare_base, compare_current, compare_incoming)
+        current[target_sheet] = xml_bytes(sheet_root)
         merge_content_types_for_part(incoming, current, source_sheet, target_sheet)
         copy_related_parts(incoming, current, source_sheet, target_sheet, {source_sheet: target_sheet})
 
@@ -625,6 +851,16 @@ def append_xlsx_incoming(base: dict[str, bytes], current: dict[str, bytes], inco
                 "sheetId": str(next_sheet_id),
                 q(NS_R, "id"): rel_id,
             },
+        )
+        report_entries.append(
+            MergeReportEntry(
+                kind="xlsx-sheet",
+                added_part=target_sheet,
+                base_part=compare_base,
+                current_part=compare_current,
+                incoming_part=compare_incoming,
+                note=comparison_note(compare_base, compare_current, compare_incoming),
+            )
         )
         next_sheet_id += 1
 
@@ -653,17 +889,21 @@ def merge_ooxml(base_path: Path, current_path: Path, incoming_path: Path, worktr
     current = read_package(current_path)
     incoming = read_package(incoming_path)
     kind = detect_kind(Path(worktree_path or current_path), current)
+    report_entries: list[MergeReportEntry] = []
 
     if kind == "pptx":
-        append_pptx_incoming(base, current, incoming)
+        append_pptx_incoming(base, current, incoming, report_entries)
     elif kind == "docx":
-        append_docx_incoming(base, current, incoming)
+        append_docx_incoming(base, current, incoming, report_entries)
     elif kind == "xlsx":
-        append_xlsx_incoming(base, current, incoming)
+        append_xlsx_incoming(base, current, incoming, report_entries)
     else:
         raise ValueError(f"unsupported OOXML type: {kind}")
 
     write_package(current_path, current)
+    report_path = write_merge_report(report_entries, worktree_path, kind)
+    if report_path:
+        log(f"ooxml append merge report: {report_path}")
     log(f"ooxml append merge success: {worktree_path or current_path}")
 
 
