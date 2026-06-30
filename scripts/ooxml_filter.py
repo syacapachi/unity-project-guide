@@ -174,6 +174,14 @@ def install_git_config() -> None:
         ["git", "config", "--local", "filter.ooxml.required", "true"],
         ["git", "config", "--local", "diff.ooxml.textconv", "python -B scripts/ooxml_filter.py textconv"],
         ["git", "config", "--local", "diff.ooxml.cachetextconv", "false"],
+        ["git", "config", "--local", "merge.ooxml-append.name", "OOXML append incoming merge"],
+        [
+            "git",
+            "config",
+            "--local",
+            "merge.ooxml-append.driver",
+            "python -B scripts/margetools/ooxml_append_merge.py merge %O %A %B %P",
+        ],
     ]
     for command in commands:
         _run_logged(command)

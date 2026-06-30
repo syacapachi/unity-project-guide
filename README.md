@@ -23,3 +23,12 @@ python scripts/ooxml_filter.py unpack sample.pptx sample-pptx
 python scripts/ooxml_filter.py pack sample-pptx sample-normalized.pptx
 python scripts/ooxml_filter.py textconv sample.pptx
 ```
+
+
+## コンフリクト発生時の対応方法
+マージツールがあるため、基本的には起きないですが、以下の場合はコンフリクトが起きます。
+- PowerPointのスライドマスター、Wordのスタイル/番号定義、Excelのスタイル/数式参照の完全統合はできないです。
+- マクロ、外部リンク、コメント、変更履歴、署名、埋め込みOLEなど、Office固有の複雑な関連部品は手動確認が必要になる。
+
+このときは、ファイル末尾に.tarをつけて内部ファイルを確認して修正するか、どちらかの設定にする必要があります。
+
