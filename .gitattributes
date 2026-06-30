@@ -1,13 +1,16 @@
-# Office Open XML zipをGit登録時に正規化し、差分表示時は展開済みXMLとして扱う
-*.pptx filter=ooxml diff=ooxml merge=ooxml-append
-*.pptm filter=ooxml diff=ooxml merge=ooxml-append
-*.docx filter=ooxml diff=ooxml merge=ooxml-append
-*.docm filter=ooxml diff=ooxml merge=ooxml-append
-*.xlsx filter=ooxml diff=ooxml merge=ooxml-append
-*.xlsm filter=ooxml diff=ooxml merge=ooxml-append
-*.xltx filter=ooxml diff=ooxml merge=ooxml-append
-*.xltm filter=ooxml diff=ooxml merge=ooxml-append
-*.xlmx filter=ooxml diff=ooxml merge=ooxml-append
+# Office Open XML本体はhookで復元する作業ファイルとして扱い、Git上では*.ooxml/配下を管理する
+*.pptx binary
+*.pptm binary
+*.docx binary
+*.docm binary
+*.xlsx binary
+*.xlsm binary
+*.xltx binary
+*.xltm binary
+*.xlmx binary
+
+# pre-commit hookが生成する展開済みOOXMLツリーは通常のテキスト差分として扱う
+*.ooxml/** text
 
 # 旧形式Officeファイルはzipではないため、正規化せずバイナリとして扱う
 *.ppt binary
