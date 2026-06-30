@@ -225,6 +225,18 @@ def directory_to_zip_data(src: Path) -> bytes:
     return _members_to_zip_data(members)
 
 
+def directory_to_tar_data(
+    src: Path,
+    large_threshold: int = DEFAULT_LARGE_FILE_THRESHOLD,
+) -> bytes:
+    """展開済みOOXMLディレクトリを正規化済みGit保存用tarへ変換する関数。"""
+    members: dict[str, bytes] = {}
+    for path in sorted(path for path in src.rglob("*") if path.is_file()):
+        arcname = safe_archive_name(path.relative_to(src).as_posix())
+        members[arcname] = maybe_normalize_member(arcname, path.read_bytes())
+    return members_to_tar_data(members, large_threshold=large_threshold)
+
+
 def unpack_container_data(data: bytes, dst: Path) -> None:
     """ZIP/TARどちらのOOXML保存形式でも、指定ディレクトリへ展開する関数。"""
     unpack_zip_data(container_to_zip_data(data), dst)
