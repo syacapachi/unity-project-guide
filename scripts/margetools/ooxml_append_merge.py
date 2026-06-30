@@ -30,6 +30,7 @@ NS_SS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 
 REL_SLIDE = f"{NS_OFFICE_REL}/slide"
 REL_WORKSHEET = f"{NS_OFFICE_REL}/worksheet"
+MERGE_WARNING = "OOXML自動マージ: incoming側のXML差分を末尾へ追加しました。内容を手動確認してください。"
 
 OOXML_EXTENSIONS = {
     ".pptx",
@@ -40,6 +41,7 @@ OOXML_EXTENSIONS = {
     ".xlsm",
     ".xltx",
     ".xltm",
+    ".xlmx",
 }
 
 
@@ -48,6 +50,20 @@ OOXML_EXTENSIONS = {
 # - 同じスライド・段落・セルを両者が編集した場合、意味的な統合や優先順位判断はできない。
 # - PowerPointのスライドマスター、Wordのスタイル/番号定義、Excelのスタイル/数式参照の完全統合はできない。
 # - マクロ、外部リンク、コメント、変更履歴、署名、埋め込みOLEなど、Office固有の複雑な関連部品は手動確認が必要になる。
+
+
+def register_namespaces() -> None:
+    """ElementTreeでXMLを書き戻す際に、OOXMLで一般的な接頭辞を保ちやすくする関数。"""
+    namespaces = {
+        "p": NS_P,
+        "r": NS_R,
+        "w": NS_W,
+        "s": NS_SS,
+        "rel": NS_REL,
+        "ct": NS_CT,
+    }
+    for prefix, namespace in namespaces.items():
+        ET.register_namespace(prefix, namespace)
 
 
 def q(namespace: str, name: str) -> str:
@@ -61,7 +77,7 @@ def log(message: str) -> None:
 
 
 def read_package(path: Path) -> dict[str, bytes]:
-    """ZIP/TARどちらのOOXML保存形式でも読み込み、zip内メンバー辞書へ変換する関数。"""
+    """textconvと同じ正規化入口を通して、zip内メンバー辞書へ変換する関数。"""
     data = container_to_zip_data(path.read_bytes())
     members: dict[str, bytes] = {}
     with zipfile.ZipFile(BytesIO(data)) as archive:
@@ -69,6 +85,16 @@ def read_package(path: Path) -> dict[str, bytes]:
             if not name.endswith("/"):
                 members[name.replace("\\", "/")] = archive.read(name)
     return members
+
+
+def read_package_or_empty(path: Path) -> dict[str, bytes]:
+    """baseなどが空またはOOXMLでない場合に、空パッケージとして扱う関数。"""
+    try:
+        if not path.exists() or path.stat().st_size == 0:
+            return {}
+        return read_package(path)
+    except (OSError, ValueError, zipfile.BadZipFile):
+        return {}
 
 
 def write_package(path: Path, members: dict[str, bytes]) -> None:
@@ -88,6 +114,55 @@ def parse_xml(members: dict[str, bytes], name: str) -> ET.Element:
 def xml_bytes(root: ET.Element) -> bytes:
     """ElementTreeをUTF-8 XML宣言付きのバイト列へ変換する関数。"""
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+
+def sanitize_xml_comment(text: str) -> str:
+    """XMLコメントとして不正な連続ハイフンなどを避けた文字列へ変換する関数。"""
+    sanitized = text.replace("--", "- -")
+    if sanitized.endswith("-"):
+        sanitized += " "
+    return sanitized
+
+
+def comparison_note(base_part: str | None, current_part: str | None, incoming_part: str) -> str:
+    """追加XMLへ書き込む比較対象メモを作る関数。"""
+    return f"base={base_part or '(none)'} current={current_part or '(none)'} incoming={incoming_part}"
+
+
+def warning_comment_text(base_part: str | None, current_part: str | None, incoming_part: str) -> str:
+    """追加XMLへ書き込む警告文と比較対象をまとめる関数。"""
+    return sanitize_xml_comment(f"{MERGE_WARNING} 比較対象: {comparison_note(base_part, current_part, incoming_part)}")
+
+
+def add_warning_comment_to_xml(data: bytes, base_part: str | None, current_part: str | None, incoming_part: str) -> bytes:
+    """コピーしたXML部品へ、警告文と比較対象をXMLコメントとして埋め込む関数。"""
+    comment = f"<!-- {warning_comment_text(base_part, current_part, incoming_part)} -->\n"
+    text = data.decode("utf-8", errors="replace")
+    stripped = text.lstrip()
+    if stripped.startswith("<?xml"):
+        declaration_end = text.find("?>")
+        if declaration_end != -1:
+            return (text[: declaration_end + 2] + "\n" + comment + text[declaration_end + 2 :]).encode("utf-8")
+    return (comment + text).encode("utf-8")
+
+
+def xml_member_changed(
+    base: dict[str, bytes],
+    current: dict[str, bytes],
+    incoming: dict[str, bytes],
+    base_part: str | None,
+    current_part: str | None,
+    incoming_part: str,
+) -> bool:
+    """textconv相当の正規化後メンバーを.xml単位で比較し、incoming差分の有無を判定する関数。"""
+    incoming_data = incoming.get(incoming_part)
+    if incoming_data is None:
+        return False
+    if base_part and base.get(base_part) == incoming_data:
+        return False
+    if current_part and current.get(current_part) == incoming_data:
+        return False
+    return True
 
 
 def rels_path_for_part(part_name: str) -> str:
@@ -273,8 +348,8 @@ def presentation_slide_parts(members: dict[str, bytes]) -> list[str]:
     return slide_parts
 
 
-def append_pptx_incoming(current: dict[str, bytes], incoming: dict[str, bytes]) -> None:
-    """incoming側のPowerPointスライドをcurrent側の末尾へ追加する関数。"""
+def append_pptx_incoming(base: dict[str, bytes], current: dict[str, bytes], incoming: dict[str, bytes]) -> None:
+    """incoming側で差分のあるPowerPointスライドだけをcurrent側の末尾へ追加する関数。"""
     presentation = parse_xml(current, "ppt/presentation.xml")
     presentation_rels = parse_xml(current, "ppt/_rels/presentation.xml.rels")
     slide_id_list = presentation.find(q(NS_P, "sldIdLst"))
@@ -288,16 +363,29 @@ def append_pptx_incoming(current: dict[str, bytes], incoming: dict[str, bytes]) 
         if slide.get("id", "0").isdigit()
     }
     next_slide_id = max(used_slide_ids | {255}) + 1
+    base_slides = presentation_slide_parts(base) if base else []
+    current_slides = presentation_slide_parts(current)
+    incoming_slides = presentation_slide_parts(incoming)
+    appended = False
 
-    for source_slide in presentation_slide_parts(incoming):
+    for index, source_slide in enumerate(incoming_slides):
+        base_slide = base_slides[index] if index < len(base_slides) else None
+        current_slide = current_slides[index] if index < len(current_slides) else None
+        if not xml_member_changed(base, current, incoming, base_slide, current_slide, source_slide):
+            continue
+
         slide_number = next_numeric_suffix(used_slide_numbers)
         used_slide_numbers.add(slide_number)
         target_slide = f"ppt/slides/slide{slide_number}.xml"
         copy_part_recursive(incoming, current, source_slide, target_slide, {source_slide: target_slide})
+        current[target_slide] = add_warning_comment_to_xml(current[target_slide], base_slide, current_slide, source_slide)
         rel_id = add_relationship(presentation_rels, REL_SLIDE, f"slides/slide{slide_number}.xml")
         ET.SubElement(slide_id_list, q(NS_P, "sldId"), {"id": str(next_slide_id), q(NS_R, "id"): rel_id})
         next_slide_id += 1
+        appended = True
 
+    if not appended:
+        return
     current["ppt/presentation.xml"] = xml_bytes(presentation)
     current["ppt/_rels/presentation.xml.rels"] = xml_bytes(presentation_rels)
 
@@ -344,8 +432,11 @@ def rewrite_relationship_ids(element: ET.Element, rid_map: dict[str, str]) -> No
                 node.set(attr_name, rid_map[attr_value])
 
 
-def append_docx_incoming(current: dict[str, bytes], incoming: dict[str, bytes]) -> None:
-    """incoming側のWord本文を改ページ付きでcurrent側の末尾へ追加する関数。"""
+def append_docx_incoming(base: dict[str, bytes], current: dict[str, bytes], incoming: dict[str, bytes]) -> None:
+    """incoming側で差分のあるWord本文だけを改ページ付きでcurrent側の末尾へ追加する関数。"""
+    if not xml_member_changed(base, current, incoming, "word/document.xml", "word/document.xml", "word/document.xml"):
+        return
+
     current_doc = parse_xml(current, "word/document.xml")
     incoming_doc = parse_xml(incoming, "word/document.xml")
     current_body = current_doc.find(q(NS_W, "body"))
@@ -361,6 +452,7 @@ def append_docx_incoming(current: dict[str, bytes], incoming: dict[str, bytes]) 
     page_break_paragraph = ET.Element(q(NS_W, "p"))
     run = ET.SubElement(page_break_paragraph, q(NS_W, "r"))
     ET.SubElement(run, q(NS_W, "br"), {q(NS_W, "type"): "page"})
+    current_body.append(ET.Comment(warning_comment_text("word/document.xml", "word/document.xml", "word/document.xml")))
     current_body.append(page_break_paragraph)
 
     for child in list(incoming_body):
@@ -457,8 +549,20 @@ def unique_sheet_name(existing: set[str], base_name: str) -> str:
     return candidate
 
 
-def append_xlsx_incoming(current: dict[str, bytes], incoming: dict[str, bytes]) -> None:
-    """incoming側のExcelシートをcurrent側の末尾へ追加する関数。"""
+def shared_strings_changed(base: dict[str, bytes], current: dict[str, bytes], incoming: dict[str, bytes]) -> bool:
+    """Excelの共有文字列XMLにincoming差分があるかを判定する関数。"""
+    return xml_member_changed(
+        base,
+        current,
+        incoming,
+        "xl/sharedStrings.xml",
+        "xl/sharedStrings.xml",
+        "xl/sharedStrings.xml",
+    )
+
+
+def append_xlsx_incoming(base: dict[str, bytes], current: dict[str, bytes], incoming: dict[str, bytes]) -> None:
+    """incoming側で差分のあるExcelシートだけをcurrent側の末尾へ追加する関数。"""
     workbook = parse_xml(current, "xl/workbook.xml")
     workbook_rels = parse_xml(current, "xl/_rels/workbook.xml.rels")
     sheets = workbook.find(q(NS_SS, "sheets"))
@@ -472,17 +576,43 @@ def append_xlsx_incoming(current: dict[str, bytes], incoming: dict[str, bytes]) 
         if sheet.get("sheetId", "0").isdigit()
     }
     used_sheet_numbers = numbers_from_paths(list(current), "sheet", ".xml")
+    shared_string_diff = shared_strings_changed(base, current, incoming)
+    base_sheets = workbook_sheet_parts(base) if base else []
+    current_sheets = workbook_sheet_parts(current)
+    incoming_sheets = workbook_sheet_parts(incoming)
+    sheets_to_append: list[tuple[str, str, str | None, str | None, str]] = []
+
+    for index, (incoming_name, source_sheet) in enumerate(incoming_sheets):
+        base_sheet = base_sheets[index][1] if index < len(base_sheets) else None
+        current_sheet = current_sheets[index][1] if index < len(current_sheets) else None
+        sheet_diff = xml_member_changed(base, current, incoming, base_sheet, current_sheet, source_sheet)
+        if sheet_diff:
+            sheets_to_append.append((incoming_name, source_sheet, base_sheet, current_sheet, source_sheet))
+        elif shared_string_diff:
+            sheets_to_append.append(
+                (
+                    incoming_name,
+                    source_sheet,
+                    "xl/sharedStrings.xml",
+                    "xl/sharedStrings.xml",
+                    "xl/sharedStrings.xml",
+                )
+            )
+
+    if not sheets_to_append:
+        return
+
     shared_string_offset = ensure_shared_strings(current, incoming)
 
     next_sheet_id = max(used_sheet_ids | {0}) + 1
-    for incoming_name, source_sheet in workbook_sheet_parts(incoming):
+    for incoming_name, source_sheet, compare_base, compare_current, compare_incoming in sheets_to_append:
         sheet_number = next_numeric_suffix(used_sheet_numbers)
         used_sheet_numbers.add(sheet_number)
         target_sheet = f"xl/worksheets/sheet{sheet_number}.xml"
 
         sheet_root = parse_xml(incoming, source_sheet)
         remap_sheet_shared_strings(sheet_root, shared_string_offset)
-        current[target_sheet] = xml_bytes(sheet_root)
+        current[target_sheet] = add_warning_comment_to_xml(xml_bytes(sheet_root), compare_base, compare_current, compare_incoming)
         merge_content_types_for_part(incoming, current, source_sheet, target_sheet)
         copy_related_parts(incoming, current, source_sheet, target_sheet, {source_sheet: target_sheet})
 
@@ -511,24 +641,25 @@ def detect_kind(path: Path, members: dict[str, bytes]) -> str:
         return "pptx"
     if suffix in {".docx", ".docm"} or "word/document.xml" in members:
         return "docx"
-    if suffix in {".xlsx", ".xlsm", ".xltx", ".xltm"} or "xl/workbook.xml" in members:
+    if suffix in {".xlsx", ".xlsm", ".xltx", ".xltm", ".xlmx"} or "xl/workbook.xml" in members:
         return "xlsx"
     raise ValueError(f"unsupported OOXML type: {path}")
 
 
 def merge_ooxml(base_path: Path, current_path: Path, incoming_path: Path, worktree_path: str | None = None) -> None:
-    """Git merge driverから呼ばれ、incoming側をcurrent側へ追加してcurrent_pathへ保存する関数。"""
-    del base_path
+    """Git merge driverから呼ばれ、incoming側のXML差分をcurrent側へ追加して保存する関数。"""
+    register_namespaces()
+    base = read_package_or_empty(base_path)
     current = read_package(current_path)
     incoming = read_package(incoming_path)
     kind = detect_kind(Path(worktree_path or current_path), current)
 
     if kind == "pptx":
-        append_pptx_incoming(current, incoming)
+        append_pptx_incoming(base, current, incoming)
     elif kind == "docx":
-        append_docx_incoming(current, incoming)
+        append_docx_incoming(base, current, incoming)
     elif kind == "xlsx":
-        append_xlsx_incoming(current, incoming)
+        append_xlsx_incoming(base, current, incoming)
     else:
         raise ValueError(f"unsupported OOXML type: {kind}")
 
